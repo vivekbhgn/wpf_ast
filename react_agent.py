@@ -37,6 +37,7 @@ def main():
     parser.add_argument("--prd", required=True, help="Path to the PRD markdown document")
     parser.add_argument("--output", default="./react_output", help="Directory where the React app will be generated")
     parser.add_argument("--model", default="claude-sonnet-4-6", help="Anthropic Model (Sonnet is recommended for complex coding tasks)")
+    parser.add_argument("--skill", default="REACT_SKILL.md", help="Path to the React skill specification file (default: REACT_SKILL.md)")
     args = parser.parse_args()
     
     if not os.getenv("ANTHROPIC_API_KEY"):
@@ -68,6 +69,16 @@ def main():
     print(f" Model Used: {args.model}")
     print(f"=================================================\n")
     
+    # Load skill specification
+    skill_path = Path(args.skill)
+    if skill_path.exists():
+        with open(skill_path, "r", encoding="utf-8") as f:
+            skill_content = f.read()
+        print(f" Skill File: {skill_path.name}")
+    else:
+        print(f" [Warning] Skill file not found at '{args.skill}' — using minimal prompt.")
+        skill_content = ""
+
     # Initialize LLM & Tool binding
     llm = ChatAnthropic(model=args.model, temperature=0.1)
     tools = [write_file]
@@ -75,27 +86,19 @@ def main():
     system_prompt = f"""You are an expert React/TypeScript frontend architect agent.
 Your objective is to read a Product Requirements Document (PRD) mapped from a legacy WPF application and completely rewrite the UI into an enterprise-ready React application.
 
-You have access to a `write_file` tool. Use this tool autonomously to construct the application. All files must be written INSIDE the output directory: {output_dir}
+You have access to a `write_file` tool. Use it autonomously. All files MUST be written INSIDE: {output_dir}
 
-Follow this exact implementation phase IN ORDER:
+{'=' * 60}
+SKILL SPECIFICATION — Follow every rule below exactly:
+{'=' * 60}
 
-1. **Types**: Create `{output_dir}/src/types/index.ts` with all TypeScript interfaces and enums from the PRD.
+{skill_content}
 
-2. **Mock Data**: Create `{output_dir}/src/mocks/mockData.ts` with realistic, comprehensive mock data matching the TypeScript interfaces.
-   - Populate every array with at least 5-10 realistic sample records.
-   - Use realistic values (real-looking names, dates, statuses, amounts) — NOT "Lorem ipsum" or "Test 1".
-   - Export every mock dataset as a named const.
-   - Also create `{output_dir}/src/mocks/handlers.ts` using `msw` (Mock Service Worker) to intercept API calls and return the mock data, so the app works offline without any backend.
+{'=' * 60}
+END OF SKILL SPECIFICATION
+{'=' * 60}
 
-3. **State Management**: Create Redux Toolkit slices or Zustand stores as specified in the PRD. Initialize state from the mock data so the UI renders immediately on load.
-
-4. **API Services**: Create API service modules. Each service must have a `USE_MOCK` flag at the top — when true, return mock data directly; when false, call the real API.
-
-5. **Components**: Create all necessary React functional components mapped in the PRD. Import and use Material-UI (MUI) components. Ensure every component is wired to the state/mock data so it renders a fully populated UI (not empty lists or placeholders).
-
-6. **App Entry**: Create `{output_dir}/src/App.tsx` and `{output_dir}/src/main.tsx` wiring everything together.
-
-Do not ask for permission. Proactively loop and call the `write_file` tool multiple times until you output the COMPLETE architecture specified in the PRD.
+Do not ask for permission. Proactively call `write_file` until every file in the Implementation Checklist above is created.
 """
 
     agent = create_react_agent(llm, tools=tools, prompt=system_prompt)
@@ -105,8 +108,10 @@ Do not ask for permission. Proactively loop and call the `write_file` tool multi
         f"--- START PRD ---\n"
         f"{prd_content}\n"
         f"--- END PRD ---\n\n"
-        f"Analyze this document and use the `write_file` tool to fully implement the React architecture. "
-        f"All paths must start with '{output_dir}/src/'."
+        f"Analyze this PRD carefully and use the `write_file` tool to implement the COMPLETE React application. "
+        f"Follow every rule in the Skill Specification provided in your system prompt. "
+        f"All file paths must start with '{output_dir}/src/'. "
+        f"Work through the Implementation Checklist in order and do not stop until every item is checked off."
     )
 
     print("Sending PRD to Claude (this will take a few minutes as it writes multiple files locally)...")
