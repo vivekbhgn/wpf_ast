@@ -11,8 +11,8 @@ def main():
     parser.add_argument("--depth", type=int, default=2, help="Depth of related components to fetch")
     args = parser.parse_args()
 
-    print(f"Scanning {args.project} ...")
-    graph = WpfAstGraph.from_directory(args.project)
+    print(f"Scanning {args.project} selectively for component '{args.component}' ...")
+    graph = WpfAstGraph.from_selective_scan(args.project, args.component)
 
     if args.export_graph:
         graph.save(args.export_graph)

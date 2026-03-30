@@ -35,8 +35,8 @@ def main():
         print("Error: ANTHROPIC_API_KEY environment variable not set. Please set it in .env")
         return
 
-    print(f"Scanning {args.project} ...")
-    graph = WpfAstGraph.from_directory(args.project)
+    print(f"Scanning {args.project} selectively for component '{args.component}' ...")
+    graph = WpfAstGraph.from_selective_scan(args.project, args.component)
     agent_tools.init_tools(graph)
 
     # Initialize LLM

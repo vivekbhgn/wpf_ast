@@ -181,6 +181,55 @@ class WpfAstGraph:
               f"{instance.G.number_of_edges()} edges")
         return instance
 
+    @classmethod
+    def from_selective_scan(cls, root_path: str, component_name: str,
+                            exclude_dirs: list[str] = None) -> "WpfAstGraph":
+        """
+        Scans only files that mention the component name, drastically saving parsing time
+        for huge enterprise codebases.
+        """
+        instance = cls()
+        root  = Path(root_path)
+        excl  = set(exclude_dirs or ['obj', 'bin', '.git', 'node_modules', 'packages'])
+        
+        base_name = component_name.replace("View", "").replace("ViewModel", "")
+        if not base_name: base_name = component_name # Fallback if empty
+
+        target_files = []
+        for f in root.rglob('*'):
+            if not f.is_file() or f.suffix not in ['.cs', '.xaml']:
+                continue
+            if any(ex in f.parts for ex in excl):
+                continue
+                
+            if base_name.lower() in f.name.lower():
+                target_files.append(f)
+                continue
+                
+            try:
+                with open(f, 'r', encoding='utf-8', errors='ignore') as fp:
+                    if base_name in fp.read():
+                        target_files.append(f)
+            except Exception:
+                pass
+
+        print(f"[WpfAstGraph] Fast-scanned {len(target_files)} files mentioning '{component_name}'")
+
+        for f in target_files:
+            path_str = str(f)
+            try:
+                if f.suffix == '.cs':
+                    instance.add_csharp_file(path_str)
+                else:
+                    instance.add_xaml_file(path_str)
+            except Exception as e:
+                print(f"  [warn] {path_str}: {e}")
+
+        instance.link_cross_references()
+        print(f"[WpfAstGraph] Sub-Graph: {instance.G.number_of_nodes()} nodes, "
+              f"{instance.G.number_of_edges()} edges")
+        return instance
+
     def add_csharp_file(self, file_path: str) -> None:
         cs_file = CSharpParser.parse_file(file_path)
         self._cs_files.append(cs_file)
