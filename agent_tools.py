@@ -411,9 +411,13 @@ def summarize_component(name: str) -> str:
     file_   = attrs.get('file', '')
     line    = attrs.get('line', 0)
 
-    # Count members
-    members = [tgt for _, tgt, d in g.G.out_edges(nid, data=True)
-               if d.get('rel') == 'contains']
+    # Extract members natively stored on the class node
+    methods_list = attrs.get('methods', [])
+    props_list = attrs.get('properties', [])
+    
+    methods_str = "\n".join(f"    - {m['name']}({', '.join(m.get('parameters', []))}) -> {m['return_type']}" for m in methods_list) if methods_list else "    (none)"
+    props_str = "\n".join(f"    - {p['name']} : {p['type_name']}" for p in props_list) if props_list else "    (none)"
+
     out_rels = [(tgt, d.get('rel'))
                 for _, tgt, d in g.G.out_edges(nid, data=True)
                 if d.get('rel') != 'contains']
@@ -440,7 +444,10 @@ def summarize_component(name: str) -> str:
         f"  File      : {file_}:{line}" if file_ else "",
         f"  Base      : {attrs.get('base_class', '')}" if attrs.get('base_class') else "",
         f"  Interfaces: {', '.join(attrs.get('interfaces', []))}" if attrs.get('interfaces') else "",
-        f"  Members   : {len(members)} contained nodes",
+        f"  Methods ({len(methods_list)}):",
+        methods_str,
+        f"  Properties ({len(props_list)}):",
+        props_str,
         f"  Outgoing  : {len(out_rels)} relationship(s)",
         f"  Incoming  : {len(in_rels)} relationship(s)",
         f"  Migration : {migration_hint}" if migration_hint else "",
@@ -451,6 +458,21 @@ def summarize_component(name: str) -> str:
         "  Incoming relationships (first 15):",
         *[f"    ← {src}  [{rel}]" for src, rel in in_rels[:15]],
     ]
+    
+    # Crucial for UI fidelity: feed the raw XAML source to the agent so it sees grids, columns, sizing, etc.
+    if kind.startswith('xaml') and file_:
+        try:
+            # We use utf-8 with ignore so it handles random binary bytes safely
+            with open(file_, 'r', encoding='utf-8', errors='ignore') as f:
+                xaml = f.read()
+                lines.extend([
+                    "",
+                    "  === RAW XAML SOURCE ===",
+                    xaml
+                ])
+        except Exception as e:
+            lines.append(f"  [Error appending XAML: {e}]")
+
     return '\n'.join(l for l in lines if l is not None)
 
 

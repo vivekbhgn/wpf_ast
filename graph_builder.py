@@ -75,6 +75,10 @@ def _class_attrs(cls: CSharpClass, file_path: str) -> dict:
         'is_viewmodel': cls.name.endswith('ViewModel') or 'INotifyPropertyChanged' in cls.interfaces,
         'is_service':  any(kw in cls.name for kw in ('Service', 'Repository', 'Context', 'Client')),
         'is_command':  'ICommand' in cls.interfaces,
+        'methods':     [{'name': m.name, 'return_type': m.return_type, 'modifiers': m.modifiers, 'parameters': [p.type_name for p in m.parameters]} for m in cls.methods],
+        'properties':  [{'name': p.name, 'type_name': p.type_name, 'modifiers': p.modifiers} for p in cls.properties],
+        'fields':      [{'name': f.name, 'type_name': f.type_name, 'modifiers': f.modifiers} for f in cls.fields],
+        'events':      [{'name': e.name, 'delegate_type': e.delegate_type} for e in cls.events]
     }
 
 def _method_attrs(m: CSharpMethod, class_id: str) -> dict:
@@ -295,15 +299,8 @@ class WpfAstGraph:
             self.G.add_edge(cid, iface_name, rel='implements',
                             _deferred=True, _target_name=iface_name)
 
-        # Methods
+        # Flattened class-to-class dependencies (no method child nodes)
         for method in cls.methods:
-            mid = _method_id(cid, method.name, method.parameters)
-            self.G.add_node(mid, **_method_attrs(method, cid))
-            self.G.add_edge(cid, mid, rel='contains')
-
-            # Track by simple name for cross-reference linking
-            self._method_by_name.setdefault(method.name, []).append(mid)
-
             # DI / constructor dependencies (ctor params)
             if method.name == cls.name:
                 for param in method.parameters:
@@ -312,42 +309,17 @@ class WpfAstGraph:
                                     _deferred=True, _target_name=ptype,
                                     param_name=param.name)
 
-            # Calls and instantiations (deferred — target may not exist yet)
-            for called in method.calls:
-                self.G.add_edge(mid, called, rel='calls',
-                                _deferred=True, _target_name=called)
             for inst in method.instantiations:
-                self.G.add_edge(mid, inst, rel='instantiates',
+                self.G.add_edge(cid, inst, rel='instantiates',
                                 _deferred=True, _target_name=inst)
 
         # Properties → type references
         for prop in cls.properties:
-            pid = f"{cid}::prop::{prop.name}"
-            self.G.add_node(pid, kind='property', label=prop.name,
-                            type_name=prop.type_name, modifiers=prop.modifiers,
-                            line=prop.line, class_id=cid)
-            self.G.add_edge(cid, pid, rel='contains')
-            # Reference the property's type
             ptype = re.sub(r'[<>?,\[\]\s]', '', prop.type_name)
             if ptype and ptype[0].isupper():
                 self.G.add_edge(cid, ptype, rel='references',
                                 _deferred=True, _target_name=ptype,
                                 via_property=prop.name)
-
-        # Fields → type references
-        for f in cls.fields:
-            fid = f"{cid}::field::{f.name}"
-            self.G.add_node(fid, kind='field', label=f.name,
-                            type_name=f.type_name, modifiers=f.modifiers,
-                            line=f.line, class_id=cid)
-            self.G.add_edge(cid, fid, rel='contains')
-
-        # Events
-        for ev in cls.events:
-            eid = f"{cid}::event::{ev.name}"
-            self.G.add_node(eid, kind='event', label=ev.name,
-                            delegate_type=ev.delegate_type, line=ev.line, class_id=cid)
-            self.G.add_edge(cid, eid, rel='contains')
 
     # ── Cross-reference resolution ─────────────────────────────────────────────
 
@@ -407,22 +379,24 @@ class WpfAstGraph:
                 if vm_id:
                     G.add_edge(xaml_node_id, vm_id, rel='data_context')
 
-            # Command bindings → ViewModel ICommand methods
+            # Command bindings → ViewModel class
             for (elem_name, cmd_path) in xf.all_commands:
-                cmd_method_name = cmd_path.replace('Command', '')
-                method_ids = self._method_by_name.get(cmd_method_name, [])
                 ctrl_id_str = f"{xaml_node_id}::{elem_name}"
                 src = ctrl_id_str if G.has_node(ctrl_id_str) else xaml_node_id
-                for mid in method_ids:
-                    G.add_edge(src, mid, rel='commands', binding_path=cmd_path)
+                
+                # Link directly to the ViewModel code-behind instead of method
+                cs_id = self._class_by_name.get(xf.x_class.split('.')[-1] if xf.x_class else "")
+                if cs_id:
+                    G.add_edge(src, cs_id, rel='commands', binding_path=cmd_path)
 
-            # Event handlers → code-behind methods
+            # Event handlers → code-behind class
             for (elem_name, event_name, handler_name) in xf.all_event_handlers:
-                method_ids = self._method_by_name.get(handler_name, [])
                 ctrl_id_str = f"{xaml_node_id}::{elem_name}"
                 src = ctrl_id_str if G.has_node(ctrl_id_str) else xaml_node_id
-                for mid in method_ids:
-                    G.add_edge(src, mid, rel='handles_event',
+                
+                cs_id = self._class_by_name.get(xf.x_class.split('.')[-1] if xf.x_class else "")
+                if cs_id:
+                    G.add_edge(src, cs_id, rel='handles_event',
                                event=event_name, handler=handler_name)
 
     def _resolve_name(self, name: str) -> Optional[str]:
