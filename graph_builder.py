@@ -194,6 +194,18 @@ class WpfAstGraph:
         
         base_name = component_name.replace("View", "").replace("ViewModel", "")
         if not base_name: base_name = component_name # Fallback if empty
+        
+        # Build exact filename permutations
+        exact_matches = {
+            f"{base_name}View.xaml".lower(),
+            f"{base_name}View.xaml.cs".lower(),
+            f"{base_name}ViewModel.cs".lower(),
+            f"{base_name}Model.cs".lower(),
+            f"{base_name}.cs".lower(),
+            f"{component_name}.xaml".lower(),
+            f"{component_name}.xaml.cs".lower(),
+            f"{component_name}.cs".lower()
+        }
 
         target_files = []
         for f in root.rglob('*'):
@@ -202,18 +214,11 @@ class WpfAstGraph:
             if any(ex in f.parts for ex in excl):
                 continue
                 
-            if base_name.lower() in f.name.lower():
+            # strict exact filename matching to prevent explosion of files
+            if f.name.lower() in exact_matches:
                 target_files.append(f)
-                continue
-                
-            try:
-                with open(f, 'r', encoding='utf-8', errors='ignore') as fp:
-                    if base_name in fp.read():
-                        target_files.append(f)
-            except Exception:
-                pass
 
-        print(f"[WpfAstGraph] Fast-scanned {len(target_files)} files mentioning '{component_name}'")
+        print(f"[WpfAstGraph] Fast-scanned: Found {len(target_files)} core component files.")
 
         for f in target_files:
             path_str = str(f)
