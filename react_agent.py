@@ -16,7 +16,13 @@ def write_file(file_path: str, content: str) -> str:
     Writes the provided content (source code) to a file. 
     It will automatically create the subdirectories if they don't exist.
     """
-    path = Path(file_path)
+    path = Path(file_path).resolve()
+    # Sandbox: ensure the file is inside the output directory
+    if hasattr(write_file, '_output_dir'):
+        output_dir = write_file._output_dir
+        if not str(path).startswith(str(output_dir)):
+            return f"Error: Path {file_path} is outside the output directory {output_dir}. Aborting."
+    
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -47,10 +53,17 @@ def main():
 
     output_dir = Path(args.output).absolute()
     output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Sandbox the write_file tool to only write inside output_dir
+    write_file._output_dir = output_dir
+
+    # Extract component name from PRD filename for a generic prompt
+    component_name = prd_path.stem.replace('_PRD', '').replace('_prd', '')
 
     print(f"=================================================")
     print(f" Starting React Builder Agent")
     print(f" Target PRD: {prd_path.name}")
+    print(f" Component:  {component_name}")
     print(f" Output Dir: {output_dir}")
     print(f" Model Used: {args.model}")
     print(f"=================================================\n")
@@ -64,11 +77,23 @@ Your objective is to read a Product Requirements Document (PRD) mapped from a le
 
 You have access to a `write_file` tool. Use this tool autonomously to construct the application. All files must be written INSIDE the output directory: {output_dir}
 
-Follow this exact implementation phase:
-1. Setup & Types: Create `src/types/index.ts` containing the core data models.
-2. State Management: Create `src/store/store.ts` and `src/store/flowSlice.ts` (or Zustand store if specified).
-3. API Services: Create `src/api/flowApi.ts` using Axios or fetch.
-4. Component Structure: Create all necessary React functional components mapped in the PRD (e.g. `src/components/FlowView.tsx`, `src/components/ActionList.tsx`, etc.). Ensure you import material-ui components as indicated in the PRD.
+Follow this exact implementation phase IN ORDER:
+
+1. **Types**: Create `{output_dir}/src/types/index.ts` with all TypeScript interfaces and enums from the PRD.
+
+2. **Mock Data**: Create `{output_dir}/src/mocks/mockData.ts` with realistic, comprehensive mock data matching the TypeScript interfaces.
+   - Populate every array with at least 5-10 realistic sample records.
+   - Use realistic values (real-looking names, dates, statuses, amounts) — NOT "Lorem ipsum" or "Test 1".
+   - Export every mock dataset as a named const.
+   - Also create `{output_dir}/src/mocks/handlers.ts` using `msw` (Mock Service Worker) to intercept API calls and return the mock data, so the app works offline without any backend.
+
+3. **State Management**: Create Redux Toolkit slices or Zustand stores as specified in the PRD. Initialize state from the mock data so the UI renders immediately on load.
+
+4. **API Services**: Create API service modules. Each service must have a `USE_MOCK` flag at the top — when true, return mock data directly; when false, call the real API.
+
+5. **Components**: Create all necessary React functional components mapped in the PRD. Import and use Material-UI (MUI) components. Ensure every component is wired to the state/mock data so it renders a fully populated UI (not empty lists or placeholders).
+
+6. **App Entry**: Create `{output_dir}/src/App.tsx` and `{output_dir}/src/main.tsx` wiring everything together.
 
 Do not ask for permission. Proactively loop and call the `write_file` tool multiple times until you output the COMPLETE architecture specified in the PRD.
 """
@@ -76,12 +101,12 @@ Do not ask for permission. Proactively loop and call the `write_file` tool multi
     agent = create_react_agent(llm, tools=tools, prompt=system_prompt)
 
     prompt = (
-        f"Here is the detailed Product Requirements Document (PRD):\n\n"
+        f"Here is the detailed Product Requirements Document (PRD) for the '{component_name}' component:\n\n"
         f"--- START PRD ---\n"
         f"{prd_content}\n"
         f"--- END PRD ---\n\n"
         f"Analyze this document and use the `write_file` tool to fully implement the React architecture. "
-        f"Create everything necessary into paths like 'src/components/FlowView.tsx'."
+        f"All paths must start with '{output_dir}/src/'."
     )
 
     print("Sending PRD to Claude (this will take a few minutes as it writes multiple files locally)...")

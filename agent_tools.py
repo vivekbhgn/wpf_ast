@@ -20,10 +20,13 @@ The agent can:
 
 from __future__ import annotations
 import json
+import logging
 import textwrap
 from typing import Optional
 
 from langchain_core.tools import tool
+
+log = logging.getLogger(__name__)
 
 # The graph is injected at import time — call init_tools(graph) first.
 _GRAPH = None
@@ -32,6 +35,8 @@ def init_tools(graph) -> None:
     """Call this with a WpfAstGraph instance before using the tools."""
     global _GRAPH
     _GRAPH = graph
+    log.info("[agent_tools] Graph injected: %d nodes, %d edges",
+             graph.G.number_of_nodes(), graph.G.number_of_edges())
 
 
 def _require_graph():
@@ -207,37 +212,56 @@ def get_dependents(class_name: str) -> str:
 @tool
 def get_call_chain(method_name: str, direction: str = "both") -> str:
     """
-    Trace the call chain for a method: who calls it and what it calls.
+    Find which classes contain a method with this name and show their relationships.
+    Since methods are now stored as class-node metadata (not individual graph nodes),
+    this tool searches class nodes for matching method names.
 
     Args:
         method_name: Method name (e.g. 'SaveAsync', 'LoadOrdersAsync').
-        direction: 'callers' (who calls this), 'callees' (what this calls),
+        direction: 'callers' (who depends on this class), 'callees' (what this class depends on),
                    or 'both' (default).
     """
     g = _require_graph()
-    method_ids = g._method_by_name.get(method_name, [])
-    if not method_ids:
-        nid = g.find_node(method_name)
-        method_ids = [nid] if nid else []
-    if not method_ids:
-        return json.dumps({"error": f"Method '{method_name}' not found."})
+    # Find classes that contain this method
+    matching_classes: list[dict] = []
+    for nid, attrs in g.G.nodes(data=True):
+        if attrs.get('kind') not in ('class', 'interface', 'struct'):
+            continue
+        methods = attrs.get('methods', [])
+        for m in methods:
+            if m.get('name') == method_name:
+                matching_classes.append({
+                    'class_id': nid,
+                    'label': attrs.get('label', nid),
+                    'method': m,
+                    'file': attrs.get('file', ''),
+                })
+                break
+
+    if not matching_classes:
+        return json.dumps({"error": f"Method '{method_name}' not found in any class."})
 
     result: list[dict] = []
-    for mid in method_ids:
+    for cls_info in matching_classes:
+        cid = cls_info['class_id']
         callers, callees = [], []
         if direction in ('callers', 'both'):
-            for src, _, d in g.G.in_edges(mid, data=True):
-                if d.get('rel') == 'calls':
-                    attrs = g.G.nodes.get(src, {})
-                    callers.append({'id': src, 'label': attrs.get('label', src),
-                                    'kind': attrs.get('kind'), 'file': attrs.get('file')})
+            for src, _, d in g.G.in_edges(cid, data=True):
+                attrs = g.G.nodes.get(src, {})
+                callers.append({'id': src, 'label': attrs.get('label', src),
+                                'kind': attrs.get('kind'), 'rel': d.get('rel')})
         if direction in ('callees', 'both'):
-            for _, tgt, d in g.G.out_edges(mid, data=True):
-                if d.get('rel') == 'calls':
-                    attrs = g.G.nodes.get(tgt, {})
-                    callees.append({'id': tgt, 'label': attrs.get('label', tgt),
-                                    'kind': attrs.get('kind'), 'file': attrs.get('file')})
-        result.append({'method_id': mid, 'callers': callers, 'callees': callees})
+            for _, tgt, d in g.G.out_edges(cid, data=True):
+                attrs = g.G.nodes.get(tgt, {})
+                callees.append({'id': tgt, 'label': attrs.get('label', tgt),
+                                'kind': attrs.get('kind'), 'rel': d.get('rel')})
+        result.append({
+            'class': cls_info['label'],
+            'method': cls_info['method'],
+            'file': cls_info['file'],
+            'callers': callers,
+            'callees': callees,
+        })
 
     return json.dumps(result, indent=2, default=str)
 
@@ -402,8 +426,10 @@ def summarize_component(name: str) -> str:
     g   = _require_graph()
     nid = g.find_node(name)
     if not nid:
+        log.warning("[summarize_component] Component '%s' not found in graph.", name)
         return f"Component '{name}' not found in graph."
 
+    log.debug("[summarize_component] Summarizing '%s' (node_id=%s)", name, nid)
     attrs   = g.G.nodes[nid]
     kind    = attrs.get('kind', '?')
     label   = attrs.get('label', nid)
@@ -461,6 +487,7 @@ def summarize_component(name: str) -> str:
     
     # Crucial for UI fidelity: feed the raw XAML source to the agent so it sees grids, columns, sizing, etc.
     if kind.startswith('xaml') and file_:
+        log.debug("[summarize_component] Appending full raw XAML from: %s", file_)
         try:
             # We use utf-8 with ignore so it handles random binary bytes safely
             with open(file_, 'r', encoding='utf-8', errors='ignore') as f:
@@ -473,7 +500,121 @@ def summarize_component(name: str) -> str:
         except Exception as e:
             lines.append(f"  [Error appending XAML: {e}]")
 
+    # Append raw C# source for ViewModels and code-behind classes (business logic fidelity)
+    if kind in ('class', 'interface', 'struct') and file_:
+        is_viewmodel = attrs.get('is_viewmodel', False)
+        is_codebehind = file_.endswith('.xaml.cs')
+        if is_viewmodel or is_codebehind:
+            log.debug("[summarize_component] Appending full raw C# source from: %s", file_)
+            try:
+                with open(file_, 'r', encoding='utf-8', errors='ignore') as f:
+                    cs_source = f.read()
+                    source_label = "RAW VIEWMODEL SOURCE" if is_viewmodel else "RAW CODE-BEHIND SOURCE"
+                    lines.extend([
+                        "",
+                        f"  === {source_label} ===",
+                        cs_source
+                    ])
+            except Exception as e:
+                lines.append(f"  [Error appending C# source: {e}]")
+
+    # Expand enum values inline so the PRD knows exact dropdown options / status codes
+    if kind == 'enum' and file_:
+        try:
+            with open(file_, 'r', encoding='utf-8', errors='ignore') as f:
+                src = f.read()
+            import re as _re
+            # Find the enum body
+            enum_pattern = _re.compile(r'enum\s+' + _re.escape(label) + r'[^{]*\{([^}]+)\}')
+            em = enum_pattern.search(src)
+            if em:
+                members = [m.strip().rstrip(',') for m in em.group(1).split('\n') if m.strip() and not m.strip().startswith('//')]
+                lines.extend([
+                    "",
+                    f"  === ENUM VALUES ({len(members)}) ===",
+                    *[f"    {m}" for m in members]
+                ])
+        except Exception as e:
+            lines.append(f"  [Error expanding enum: {e}]")
+
     return '\n'.join(l for l in lines if l is not None)
+
+
+# ── 9b. extract_binding_map ─────────────────────────────────────────────────
+
+@tool
+def extract_binding_map(component_name: str) -> str:
+    """
+    Extract a structured data-binding map from a XAML component showing every
+    UI element, its bound property, binding path, mode, and converter.
+    This is critical for ensuring the React app replicates the exact data flow.
+
+    Args:
+        component_name: The XAML component name (e.g. 'FlowView').
+    """
+    g = _require_graph()
+    nid = g.find_node(component_name)
+    if not nid:
+        return f"Component '{component_name}' not found."
+
+    attrs = g.G.nodes[nid]
+    file_ = attrs.get('file', '')
+    if not file_ or not file_.endswith('.xaml'):
+        return f"'{component_name}' is not a XAML component."
+
+    # Find the parsed XamlFile from the graph's internal store
+    xaml_file = None
+    for xf in g._xaml_files:
+        if xf.path == file_:
+            xaml_file = xf
+            break
+
+    if not xaml_file:
+        return f"XAML file data not found for '{component_name}'."
+
+    rows = []
+    # Walk all bindings in the parsed XAML
+    for binding in xaml_file.all_bindings:
+        rows.append({
+            'property': binding.target_property,
+            'path': binding.source_path,
+            'mode': binding.mode,
+            'converter': binding.converter or '',
+            'element_name': binding.element_name or '',
+        })
+
+    # Walk all commands
+    for elem_name, cmd_path in xaml_file.all_commands:
+        rows.append({
+            'property': 'Command',
+            'path': cmd_path,
+            'mode': 'OneWay',
+            'converter': '',
+            'element_name': elem_name,
+        })
+
+    # Walk all event handlers
+    for elem_name, event, handler in xaml_file.all_event_handlers:
+        rows.append({
+            'property': f'Event:{event}',
+            'path': handler,
+            'mode': 'Handler',
+            'converter': '',
+            'element_name': elem_name,
+        })
+
+    # Format as markdown table for the LLM
+    header = "| Element | Property | Binding Path | Mode | Converter |"
+    sep    = "|---------|----------|-------------|------|-----------|"
+    table_rows = []
+    for r in rows:
+        table_rows.append(
+            f"| {r['element_name']} | {r['property']} | {r['path']} | {r['mode']} | {r['converter']} |"
+        )
+
+    table = '\n'.join([header, sep] + table_rows)
+    log.info("[extract_binding_map] Extracted %d bindings from '%s'", len(rows), component_name)
+    return f"Binding Map for {component_name} ({len(rows)} bindings):\n\n{table}"
 
 
 # ── 10. search_components ───────────────────────────────────────────────────

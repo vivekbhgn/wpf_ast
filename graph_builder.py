@@ -28,6 +28,7 @@ Edge types (stored in edge attribute 'rel'):
 """
 
 from __future__ import annotations
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -38,6 +39,8 @@ import networkx as nx
 
 from parsers.csharp_parser import CSharpParser, CSharpFile, CSharpClass, CSharpMethod
 from parsers.xaml_parser   import XamlParser,   XamlFile,   XamlNode
+
+log = logging.getLogger(__name__)
 
 
 # ── Node ID helpers ────────────────────────────────────────────────────────────
@@ -81,19 +84,7 @@ def _class_attrs(cls: CSharpClass, file_path: str) -> dict:
         'events':      [{'name': e.name, 'delegate_type': e.delegate_type} for e in cls.events]
     }
 
-def _method_attrs(m: CSharpMethod, class_id: str) -> dict:
-    return {
-        'kind':        'method',
-        'label':       m.name,
-        'return_type': m.return_type,
-        'modifiers':   m.modifiers,
-        'is_async':    m.is_async,
-        'is_override': m.is_override,
-        'attributes':  m.attributes,
-        'class_id':    class_id,
-        'line':        m.line,
-        'param_types': [p.type_name for p in m.parameters],
-    }
+
 
 def _xaml_attrs(xf: XamlFile) -> dict:
     root = xf.root_tag
@@ -135,7 +126,7 @@ class WpfAstGraph:
         self._class_by_id:    dict[str, str] = {}   # full_id → node_id (same, for clarity)
         self._xaml_by_class:  dict[str, str] = {}   # x_class → xaml node_id
         self._xaml_by_file:   dict[str, str] = {}   # file_path → xaml node_id
-        self._method_by_name: dict[str, list[str]] = {}  # method_name → [node_ids]
+
         self._cs_files:       list[CSharpFile] = []
         self._xaml_files:     list[XamlFile]   = []
 
@@ -192,12 +183,13 @@ class WpfAstGraph:
         Scans only files that mention the component name, drastically saving parsing time
         for huge enterprise codebases.
         """
+        log.info("[graph_builder] Selective scan for '%s' in: %s", component_name, root_path)
         instance = cls()
         root  = Path(root_path)
         excl  = set(exclude_dirs or ['obj', 'bin', '.git', 'node_modules', 'packages'])
         
         base_name = component_name.replace("View", "").replace("ViewModel", "")
-        if not base_name: base_name = component_name # Fallback if empty
+        if not base_name: base_name = component_name
         
         # Build exact filename permutations
         exact_matches = {
@@ -210,31 +202,39 @@ class WpfAstGraph:
             f"{component_name}.xaml.cs".lower(),
             f"{component_name}.cs".lower()
         }
+        log.debug("[graph_builder] Exact filename matches to look for: %s", exact_matches)
 
         target_files = []
         for f in root.rglob('*'):
-            if not f.is_file() or f.suffix not in ['.cs', '.xaml']:
+            if not f.is_file() or f.suffix.lower() not in ('.cs', '.xaml'):
                 continue
             if any(ex in f.parts for ex in excl):
                 continue
                 
             # strict exact filename matching to prevent explosion of files
             if f.name.lower() in exact_matches:
+                log.debug("[graph_builder]   Matched file: %s", f)
                 target_files.append(f)
 
         print(f"[WpfAstGraph] Fast-scanned: Found {len(target_files)} core component files.")
+        log.info("[graph_builder] Fast-scan complete: %d files matched", len(target_files))
 
         for f in target_files:
             path_str = str(f)
             try:
                 if f.suffix == '.cs':
+                    log.debug("[graph_builder]   Parsing C#: %s", path_str)
                     instance.add_csharp_file(path_str)
                 else:
+                    log.debug("[graph_builder]   Parsing XAML: %s", path_str)
                     instance.add_xaml_file(path_str)
             except Exception as e:
+                log.warning("[graph_builder]   Parse error for %s: %s", path_str, e)
                 print(f"  [warn] {path_str}: {e}")
 
         instance.link_cross_references()
+        log.info("[graph_builder] Sub-graph complete: %d nodes, %d edges",
+                 instance.G.number_of_nodes(), instance.G.number_of_edges())
         print(f"[WpfAstGraph] Sub-Graph: {instance.G.number_of_nodes()} nodes, "
               f"{instance.G.number_of_edges()} edges")
         return instance
@@ -411,10 +411,6 @@ class WpfAstGraph:
         stripped = re.sub(r'<.*>', '', name).strip()
         if stripped in self._class_by_name:
             return self._class_by_name[stripped]
-        # Method lookup
-        if name in self._method_by_name:
-            ids = self._method_by_name[name]
-            return ids[0] if ids else None
         return None
 
     # ── Query API ──────────────────────────────────────────────────────────────
@@ -449,6 +445,7 @@ class WpfAstGraph:
         """
         visited_nodes: dict[str, dict] = {}
         visited_edges: list[tuple[str, str, str]] = []
+        visited_edges_set: set[tuple[str, str, str]] = set()
         queue = [(node_id, 0)]
         seen  = {node_id}
 
@@ -465,7 +462,8 @@ class WpfAstGraph:
                 if rel_filter and rel not in rel_filter:
                     continue
                 edge = (current, tgt, rel)
-                if edge not in visited_edges:
+                if edge not in visited_edges_set:
+                    visited_edges_set.add(edge)
                     visited_edges.append(edge)
                 if tgt not in seen:
                     seen.add(tgt)
@@ -477,7 +475,8 @@ class WpfAstGraph:
                 if rel_filter and rel not in rel_filter:
                     continue
                 edge = (src, current, rel)
-                if edge not in visited_edges:
+                if edge not in visited_edges_set:
+                    visited_edges_set.add(edge)
                     visited_edges.append(edge)
                 if src not in seen:
                     seen.add(src)

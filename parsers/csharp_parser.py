@@ -241,6 +241,12 @@ class CSharpParser:
         r'(?P<name>[A-Z][A-Za-z0-9_]*)\s*'
         r'\{(?P<accessors>[^}]*)\}'
     )
+    _EXPR_PROP_PAT = re.compile(
+        r'(?P<mods>(?:(?:public|private|protected|internal|static|virtual|'
+        r'override|abstract|new|readonly|required)\s+)*)'
+        r'(?P<type>[\w<>\[\],\s\?\.]+?)\s+'
+        r'(?P<name>[A-Z][A-Za-z0-9_]*)\s*=>\s*'
+    )
     _METHOD_PAT  = re.compile(
         r'(?P<mods>(?:(?:public|private|protected|internal|static|virtual|'
         r'override|abstract|async|new|unsafe|extern|partial)\s+)*)'
@@ -386,6 +392,25 @@ class CSharpParser:
                 line=base_line + _line_number(body, m.start()) - 1,
                 attributes=attrs, raw=m.group(0),
             ))
+
+        # Expression-bodied properties: public string Name => _name;
+        for m in cls._EXPR_PROP_PAT.finditer(body):
+            name = m.group('name').strip()
+            type_name = m.group('type').strip()
+            mods_raw = m.group('mods').strip()
+            mods = [t for t in mods_raw.split() if t in _MODIFIERS]
+            if type_name in ('return', 'throw', 'if', 'else', 'for'):
+                continue
+            # Skip if already captured by the standard property regex
+            if any(p.name == name for p in props):
+                continue
+            props.append(CSharpProperty(
+                name=name, type_name=type_name, modifiers=mods,
+                has_getter=True, has_setter=False, is_auto=False,
+                line=base_line + _line_number(body, m.start()) - 1,
+                attributes=[], raw=m.group(0),
+            ))
+
         return props
 
     @classmethod
